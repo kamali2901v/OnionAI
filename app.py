@@ -3,6 +3,7 @@ import numpy as np
 import tensorflow as tf
 import csv
 import os
+import pandas as pd
 from datetime import datetime
 from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 from PIL import Image
@@ -27,6 +28,14 @@ def load_model():
 
 model = load_model()
 rules = load_rules()
+
+def log_to_audit(row):
+    file_exists = os.path.isfile(AUDIT_FILE)
+    with open(AUDIT_FILE, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=row.keys())
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
 
 tab1, tab2 = st.tabs(["📷 Camera", "📁 Upload"])
 
@@ -75,7 +84,7 @@ if img_file is not None:
         "verified AGMARK/NAFED onion grading standards."
     )
 
-    # --- Audit log ---
+    # --- Log the original AI prediction (always happens) ---
     sample_id = datetime.now().strftime("%Y%m%d%H%M%S")
     log_row = {
         "sample_id": sample_id,
@@ -84,18 +93,40 @@ if img_file is not None:
         "confidence": round(float(confidence), 4),
         "grade": grading_result["grade"],
         "manual_review_required": grading_result["manual_review_required"],
+        "human_reviewed": False,
+        "human_decision": "",
     }
+    log_to_audit(log_row)
 
-    file_exists = os.path.isfile(AUDIT_FILE)
-    with open(AUDIT_FILE, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=log_row.keys())
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(log_row)
+    # --- Human-in-the-loop: confirm or correct ---
+    st.divider()
+    st.write("**Human Review**")
+    col1, col2 = st.columns(2)
 
+    with col1:
+        if st.button("✅ Confirm AI result", key=f"confirm_{sample_id}"):
+            review_row = dict(log_row)
+            review_row["human_reviewed"] = True
+            review_row["human_decision"] = predicted_class
+            log_to_audit(review_row)
+            st.success("Confirmed and logged.")
+
+    with col2:
+        correction = st.selectbox(
+            "Or correct it:",
+            ["", "healthy", "defective"],
+            key=f"correction_select_{sample_id}",
+        )
+        if correction and st.button("Submit correction", key=f"correct_{sample_id}"):
+            review_row = dict(log_row)
+            review_row["human_reviewed"] = True
+            review_row["human_decision"] = correction
+            log_to_audit(review_row)
+            st.success(f"Correction logged: {correction.upper()}")
+
+    # --- Audit log viewer ---
     with st.expander("📋 View audit log"):
         if os.path.isfile(AUDIT_FILE):
             with open(AUDIT_FILE, "rb") as f:
                 st.download_button("Download audit log (CSV)", f, file_name="audit_log.csv")
-            import pandas as pd
             st.dataframe(pd.read_csv(AUDIT_FILE))

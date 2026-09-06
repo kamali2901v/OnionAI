@@ -1,13 +1,18 @@
-import streamlit as st
+  import streamlit as st
 import numpy as np
 import tensorflow as tf
+import csv
+import os
+from datetime import datetime
 from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 from PIL import Image
+from grading import load_rules, apply_grading
 
 IMG_SIZE = (224, 224)
 MODEL_PATH = "models/onion_classifier_v1.keras"
 CLASS_NAMES = ["defective", "healthy"]  # match evaluate.py's printed class order
 CONFIDENCE_THRESHOLD = 0.70
+AUDIT_FILE = "audit_log.csv"
 
 st.set_page_config(page_title="OnionAI", page_icon="🧅")
 st.title("🧅 OnionAI — Quality Check")
@@ -21,6 +26,7 @@ def load_model():
     )
 
 model = load_model()
+rules = load_rules()
 
 tab1, tab2 = st.tabs(["📷 Camera", "📁 Upload"])
 
@@ -55,4 +61,41 @@ if img_file is not None:
     if confidence < CONFIDENCE_THRESHOLD:
         st.warning("⚠️ Low confidence — manual inspection recommended.")
     else:
-        st.success("✅ High confidence prediction")   
+        st.success("✅ High confidence prediction")
+
+    # --- Grading ---
+    grading_result = apply_grading(predicted_class, float(confidence), rules)
+
+    st.subheader(f"Grade: {grading_result['grade']}")
+    if grading_result["manual_review_required"]:
+        st.warning("⚠️ Manual review required before final grading.")
+
+    st.caption(
+        "Grading thresholds are currently provisional, pending sourcing of "
+        "verified AGMARK/NAFED onion grading standards."
+    )
+
+    # --- Audit log ---
+    sample_id = datetime.now().strftime("%Y%m%d%H%M%S")
+    log_row = {
+        "sample_id": sample_id,
+        "timestamp": datetime.now().isoformat(),
+        "prediction": predicted_class,
+        "confidence": round(float(confidence), 4),
+        "grade": grading_result["grade"],
+        "manual_review_required": grading_result["manual_review_required"],
+    }
+
+    file_exists = os.path.isfile(AUDIT_FILE)
+    with open(AUDIT_FILE, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=log_row.keys())
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(log_row)
+
+    with st.expander("📋 View audit log"):
+        if os.path.isfile(AUDIT_FILE):
+            with open(AUDIT_FILE, "rb") as f:
+                st.download_button("Download audit log (CSV)", f, file_name="audit_log.csv")
+            import pandas as pd
+            st.dataframe(pd.read_csv(AUDIT_FILE))

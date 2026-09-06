@@ -1,0 +1,14 @@
+{
+  "_note": "PLACEHOLDER thresholds pending verified AGMARK/NAFED onion grading specifications. Do not present as official government values in production.",
+  "confidence_thresholds": {
+    "high": 0.85,
+    "low": 0.60
+  },
+  "grades": {
+    "healthy_high": "Grade A",
+    "healthy_review": "Grade A (Pending Manual Review)",
+    "defective_high": "URS (Under Relaxed Specification)",
+    "defective_review": "URS (Pending Manual Review)",
+    "uncertain": "Manual Inspection Required"
+  }
+}

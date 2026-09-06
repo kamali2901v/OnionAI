@@ -125,8 +125,10 @@ if img_file is not None:
             st.success(f"Correction logged: {correction.upper()}")
 
     # --- Audit log viewer ---
-    with st.expander("📋 View audit log"):
-        if os.path.isfile(AUDIT_FILE):
-            with open(AUDIT_FILE, "rb") as f:
-                st.download_button("Download audit log (CSV)", f, file_name="audit_log.csv")
-            st.dataframe(pd.read_csv(AUDIT_FILE))
+  with st.expander("📋 View audit log"):
+    if os.path.isfile(AUDIT_FILE):
+        with open(AUDIT_FILE, "rb") as f:
+            st.download_button("Download audit log (CSV)", f, file_name="audit_log.csv")
+        log_df = pd.read_csv(AUDIT_FILE)
+        log_df = log_df.sort_values("timestamp", ascending=False)  # newest first
+        st.dataframe(log_df)

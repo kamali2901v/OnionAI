@@ -83,43 +83,54 @@ if img_file is not None:
         "verified AGMARK/NAFED onion grading standards."
     )
 
-    sample_id = datetime.now().strftime("%Y%m%d%H%M%S")
-    log_row = {
-        "sample_id": sample_id,
-        "timestamp": datetime.now().isoformat(),
-        "prediction": predicted_class,
-        "confidence": round(float(confidence), 4),
-        "grade": grading_result["grade"],
-        "manual_review_required": grading_result["manual_review_required"],
-        "human_reviewed": False,
-        "human_decision": "",
-    }
-    log_to_audit(log_row)
+    # Stable ID tied to the photo itself, not the clock — same photo = same id every rerun
+    img_bytes = img_file.getvalue()
+    sample_id = str(hash(img_bytes))
 
     st.divider()
     st.write("**Human Review**")
+    st.write("Does this AI result look correct to you?")
     col1, col2 = st.columns(2)
 
+    already_logged_key = f"logged_{sample_id}"
+    if already_logged_key not in st.session_state:
+        st.session_state[already_logged_key] = False
+
+    human_decision = None
     with col1:
-        if st.button("✅ Confirm AI result", key=f"confirm_{sample_id}"):
-            review_row = dict(log_row)
-            review_row["human_reviewed"] = True
-            review_row["human_decision"] = predicted_class
-            log_to_audit(review_row)
-            st.success("Confirmed and logged.")
+        if st.button("✅ Yes, AI is correct", key=f"confirm_{sample_id}"):
+            human_decision = predicted_class
 
     with col2:
         correction = st.selectbox(
-            "Or correct it:",
+            "❌ No, it's actually:",
             ["", "healthy", "defective"],
             key=f"correction_select_{sample_id}",
         )
-        if correction and st.button("Submit correction", key=f"correct_{sample_id}"):
-            review_row = dict(log_row)
-            review_row["human_reviewed"] = True
-            review_row["human_decision"] = correction
-            log_to_audit(review_row)
-            st.success(f"Correction logged: {correction.upper()}")
+        if correction and st.button("Submit correction", key=f"submit_correction_{sample_id}"):
+            human_decision = correction
+
+    # --- Log ONE row per photo, only once, guarded by session_state ---
+    if human_decision is not None and not st.session_state[already_logged_key]:
+        log_row = {
+            "sample_id": sample_id,
+            "timestamp": datetime.now().isoformat(),
+            "ai_prediction": predicted_class,
+            "ai_confidence": round(float(confidence), 4),
+            "grade": grading_result["grade"],
+            "human_agreed": human_decision == predicted_class,
+            "final_decision": human_decision,
+        }
+        log_to_audit(log_row)
+        st.session_state[already_logged_key] = True
+        if human_decision == predicted_class:
+            st.success(f"✅ Logged: Human confirmed AI's result ({predicted_class.upper()})")
+        else:
+            st.warning(f"⚠️ Logged: Human corrected AI. AI said {predicted_class.upper()}, human says {human_decision.upper()}")
+    elif st.session_state[already_logged_key]:
+        st.info("✔️ This sample has already been logged.")
+    else:
+        st.info("👆 Please confirm or correct the result above to log this sample.")
 
     with st.expander("📋 View audit log"):
         if os.path.isfile(AUDIT_FILE):

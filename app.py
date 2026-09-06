@@ -72,7 +72,6 @@ if img_file is not None:
     else:
         st.success("✅ High confidence prediction")
 
-    # --- Grading ---
     grading_result = apply_grading(predicted_class, float(confidence), rules)
 
     st.subheader(f"Grade: {grading_result['grade']}")
@@ -84,7 +83,6 @@ if img_file is not None:
         "verified AGMARK/NAFED onion grading standards."
     )
 
-    # --- Log the original AI prediction (always happens) ---
     sample_id = datetime.now().strftime("%Y%m%d%H%M%S")
     log_row = {
         "sample_id": sample_id,
@@ -98,7 +96,6 @@ if img_file is not None:
     }
     log_to_audit(log_row)
 
-    # --- Human-in-the-loop: confirm or correct ---
     st.divider()
     st.write("**Human Review**")
     col1, col2 = st.columns(2)
@@ -124,11 +121,10 @@ if img_file is not None:
             log_to_audit(review_row)
             st.success(f"Correction logged: {correction.upper()}")
 
-    # --- Audit log viewer ---
-  with st.expander("📋 View audit log"):
-    if os.path.isfile(AUDIT_FILE):
-        with open(AUDIT_FILE, "rb") as f:
-            st.download_button("Download audit log (CSV)", f, file_name="audit_log.csv")
-        log_df = pd.read_csv(AUDIT_FILE)
-        log_df = log_df.sort_values("timestamp", ascending=False)  # newest first
-        st.dataframe(log_df)
+    with st.expander("📋 View audit log"):
+        if os.path.isfile(AUDIT_FILE):
+            with open(AUDIT_FILE, "rb") as f:
+                st.download_button("Download audit log (CSV)", f, file_name="audit_log.csv")
+            log_df = pd.read_csv(AUDIT_FILE)
+            log_df = log_df.sort_values("timestamp", ascending=False)
+            st.dataframe(log_df)

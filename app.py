@@ -1,23 +1,26 @@
 import streamlit as st
 import numpy as np
 import tensorflow as tf
-import csv
-import os
 import pandas as pd
-from datetime import datetime
 from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 from PIL import Image
+
 from grading import load_rules, apply_grading
+from db import (
+    init_db, create_batch, create_sample, record_human_decision,
+    get_batch_summary, get_all_batches,
+)
 
 IMG_SIZE = (224, 224)
 MODEL_PATH = "models/onion_classifier_v1.keras"
 CLASS_NAMES = ["defective", "healthy"]  # match evaluate.py's printed class order
 CONFIDENCE_THRESHOLD = 0.70
-AUDIT_FILE = "audit_log.csv"
 
-st.set_page_config(page_title="OnionAI", page_icon="🧅")
-st.title("🧅 OnionAI — Quality Check")
-st.write("Take a photo or upload an onion image to check its quality.")
+init_db()
+
+st.set_page_config(page_title="AgroNex", page_icon="🧅")
+st.title("🧅 AgroNex — Onion Procurement Inspection")
+st.write("AI-assisted quality assessment for procurement batches.")
 
 @st.cache_resource
 def load_model():
@@ -29,13 +32,42 @@ def load_model():
 model = load_model()
 rules = load_rules()
 
-def log_to_audit(row):
-    file_exists = os.path.isfile(AUDIT_FILE)
-    with open(AUDIT_FILE, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=row.keys())
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(row)
+# ---------------- BATCH SELECTION / CREATION ----------------
+st.divider()
+st.subheader("📦 Batch")
+
+existing_batches = get_all_batches()
+batch_options = ["+ Create New Batch"] + [b["batch_id"] for b in existing_batches]
+selected = st.selectbox("Select or create a batch:", batch_options)
+
+if selected == "+ Create New Batch":
+    with st.form("new_batch_form"):
+        supplier_name = st.text_input("Supplier / Farmer Name")
+        procurement_centre = st.text_input("Procurement Centre")
+        onion_variety = st.text_input("Onion Variety", value="Red Onion")
+        quantity_received = st.number_input("Quantity Received", min_value=0.0, value=0.0)
+        unit = st.selectbox("Unit", ["kg", "quintal", "tonne"])
+        intended_use = st.selectbox("Intended Use", ["Storage", "Immediate Dispatch", "Other"])
+        submitted = st.form_submit_button("Create Batch")
+
+        if submitted:
+            new_batch_id = create_batch(
+                supplier_name, procurement_centre, onion_variety,
+                quantity_received, unit, intended_use
+            )
+            st.success(f"✅ Batch created: {new_batch_id}")
+            st.session_state["active_batch"] = new_batch_id
+            st.rerun()
+
+    st.stop()  # don't show inspection UI until a batch exists
+else:
+    st.session_state["active_batch"] = selected
+    active_batch = selected
+    st.info(f"Active batch: **{active_batch}**")
+
+# ---------------- SAMPLE INSPECTION ----------------
+st.divider()
+st.subheader("🔍 Sample Inspection")
 
 tab1, tab2 = st.tabs(["📷 Camera", "📁 Upload"])
 
@@ -63,7 +95,7 @@ if img_file is not None:
     predicted_class = CLASS_NAMES[1] if prob > 0.5 else CLASS_NAMES[0]
     confidence = prob if prob > 0.5 else 1 - prob
 
-    st.subheader(f"Prediction: {predicted_class.upper()}")
+    st.subheader(f"AI Prediction: {predicted_class.upper()}")
     st.progress(float(confidence))
     st.write(f"Confidence: {confidence * 100:.1f}%")
 
@@ -83,18 +115,33 @@ if img_file is not None:
         "verified AGMARK/NAFED onion grading standards."
     )
 
-    # Stable ID tied to the photo itself, not the clock — same photo = same id every rerun
+    # Stable key tied to the photo bytes, so a rerun doesn't create a duplicate sample
     img_bytes = img_file.getvalue()
-    sample_id = str(hash(img_bytes))
+    photo_key = str(hash(img_bytes))
+    sample_id_key = f"sample_id_{photo_key}"
+
+    # Create the sample row in the database ONCE per unique photo
+    if sample_id_key not in st.session_state:
+        new_sample_id = create_sample(
+            batch_id=active_batch,
+            image_path="(not saved to disk in this MVP)",
+            ai_prediction=predicted_class,
+            ai_confidence=float(confidence),
+            grade=grading_result["grade"],
+        )
+        st.session_state[sample_id_key] = new_sample_id
+
+    sample_id = st.session_state[sample_id_key]
+    st.caption(f"Sample ID: **{sample_id}**")
 
     st.divider()
     st.write("**Human Review**")
     st.write("Does this AI result look correct to you?")
     col1, col2 = st.columns(2)
 
-    already_logged_key = f"logged_{sample_id}"
-    if already_logged_key not in st.session_state:
-        st.session_state[already_logged_key] = False
+    reviewed_key = f"reviewed_{sample_id}"
+    if reviewed_key not in st.session_state:
+        st.session_state[reviewed_key] = False
 
     human_decision = None
     with col1:
@@ -110,32 +157,28 @@ if img_file is not None:
         if correction and st.button("Submit correction", key=f"submit_correction_{sample_id}"):
             human_decision = correction
 
-    # --- Log ONE row per photo, only once, guarded by session_state ---
-    if human_decision is not None and not st.session_state[already_logged_key]:
-        log_row = {
-            "sample_id": sample_id,
-            "timestamp": datetime.now().isoformat(),
-            "ai_prediction": predicted_class,
-            "ai_confidence": round(float(confidence), 4),
-            "grade": grading_result["grade"],
-            "human_agreed": human_decision == predicted_class,
-            "final_decision": human_decision,
-        }
-        log_to_audit(log_row)
-        st.session_state[already_logged_key] = True
+    if human_decision is not None and not st.session_state[reviewed_key]:
+        record_human_decision(sample_id, human_decision)
+        st.session_state[reviewed_key] = True
         if human_decision == predicted_class:
-            st.success(f"✅ Logged: Human confirmed AI's result ({predicted_class.upper()})")
+            st.success(f"✅ Recorded: Human confirmed AI's result ({predicted_class.upper()})")
         else:
-            st.warning(f"⚠️ Logged: Human corrected AI. AI said {predicted_class.upper()}, human says {human_decision.upper()}")
-    elif st.session_state[already_logged_key]:
-        st.info("✔️ This sample has already been logged.")
+            st.warning(
+                f"⚠️ Recorded: Human corrected AI. "
+                f"AI said {predicted_class.upper()}, human says {human_decision.upper()}"
+            )
+    elif st.session_state[reviewed_key]:
+        st.info("✔️ This sample has already been reviewed.")
     else:
-        st.info("👆 Please confirm or correct the result above to log this sample.")
+        st.info("👆 Please confirm or correct the result above to record this sample.")
 
-    with st.expander("📋 View audit log"):
-        if os.path.isfile(AUDIT_FILE):
-            with open(AUDIT_FILE, "rb") as f:
-                st.download_button("Download audit log (CSV)", f, file_name="audit_log.csv")
-            log_df = pd.read_csv(AUDIT_FILE)
-            log_df = log_df.sort_values("timestamp", ascending=False)
-            st.dataframe(log_df)
+# ---------------- BATCH SUMMARY ----------------
+st.divider()
+st.subheader("📊 Batch Summary")
+summary = get_batch_summary(active_batch)
+
+col1, col2, col3 = st.columns(3)
+col1.metric("Total Samples", summary["total_samples"])
+col2.metric("Healthy %", f"{summary['healthy_pct']}%")
+col3.metric("Defective %", f"{summary['defective_pct']}%")
+st.caption(f"Human corrections: {summary['human_corrections']}")

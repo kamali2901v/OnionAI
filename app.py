@@ -38,7 +38,11 @@ st.subheader("📦 Batch")
 
 existing_batches = get_all_batches()
 batch_options = ["+ Create New Batch"] + [b["batch_id"] for b in existing_batches]
-selected = st.selectbox("Select or create a batch:", batch_options)
+default_index = 0
+if "active_batch" in st.session_state and st.session_state["active_batch"] in batch_options:
+    default_index = batch_options.index(st.session_state["active_batch"])
+
+selected = st.selectbox("Select or create a batch:", batch_options, index=default_index)
 
 if selected == "+ Create New Batch":
     with st.form("new_batch_form"):

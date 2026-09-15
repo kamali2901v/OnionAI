@@ -1,26 +1,85 @@
 import streamlit as st
 import numpy as np
 import tensorflow as tf
-import pandas as pd
 from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 from PIL import Image
+import os
+from datetime import datetime
 
-from grading import load_rules, apply_grading
 from db import (
     init_db, create_batch, create_sample, record_human_decision,
-    get_batch_summary, get_all_batches,
+    record_size_assessment, get_batch_summary, get_all_batches, get_batch_samples
 )
+from translations import t
+from report_generator import generate_batch_report
 
 IMG_SIZE = (224, 224)
-MODEL_PATH = "models/onion_classifier_v1.keras"
-CLASS_NAMES = ["defective", "healthy"]  # match evaluate.py's printed class order
-CONFIDENCE_THRESHOLD = 0.70
+MODEL_PATH = "models/onion_classifier_multiclass.keras"
+CLASS_NAMES = ["damaged", "healthy", "rotten"]
+CONFIDENCE_THRESHOLD = 0.60
+UPLOAD_DIR = "uploads"
 
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 init_db()
 
-st.set_page_config(page_title="AgroNex", page_icon="🧅")
-st.title("🧅 AgroNex — Onion Procurement Inspection")
-st.write("AI-assisted quality assessment for procurement batches.")
+if "lang" not in st.session_state:
+    st.session_state.lang = "en"
+
+lang_display = {"English": "en", "தமிழ் (Tamil)": "ta", "हिन्दी (Hindi)": "hi"}
+lang_choice = st.sidebar.selectbox(
+    "Language / மொழி / भाषा",
+    list(lang_display.keys()),
+    index=list(lang_display.values()).index(st.session_state.lang),
+)
+st.session_state.lang = lang_display[lang_choice]
+lang = st.session_state.lang
+
+st.set_page_config(page_title=t("app_title", lang), page_icon="🧅", layout="centered")
+st.markdown("""
+<style>
+    .main {
+        background-color: #FAF7F2;
+    }
+    h1 {
+        color: #8B4513;
+        font-weight: 700;
+    }
+    h2, h3 {
+        color: #5C4033;
+    }
+    div.stButton > button {
+        background-color: #8B4513;
+        color: white;
+        border-radius: 8px;
+        border: none;
+        padding: 0.5rem 1.2rem;
+        font-weight: 600;
+    }
+    div.stButton > button:hover {
+        background-color: #A0522D;
+        color: white;
+    }
+    [data-testid="stMetricValue"] {
+        color: #8B4513;
+        font-weight: 700;
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        background-color: #F5DEB3;
+        border-radius: 8px 8px 0 0;
+        padding: 8px 16px;
+    }
+    div[data-testid="stExpander"] {
+        border: 1px solid #E0D5C7;
+        border-radius: 10px;
+    }
+    .stAlert {
+        border-radius: 8px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 @st.cache_resource
 def load_model():
@@ -30,159 +89,160 @@ def load_model():
     )
 
 model = load_model()
-rules = load_rules()
 
-# ---------------- BATCH SELECTION / CREATION ----------------
-st.divider()
-st.subheader("📦 Batch")
+st.title(t("app_title", lang))
 
-existing_batches = get_all_batches()
-batch_options = ["+ Create New Batch"] + [b["batch_id"] for b in existing_batches]
-default_index = 0
-if "active_batch" in st.session_state and st.session_state["active_batch"] in batch_options:
-    default_index = batch_options.index(st.session_state["active_batch"])
+# --- Sidebar: batch selection/creation ---
+st.sidebar.header(t("batch_header", lang))
 
-selected = st.selectbox("Select or create a batch:", batch_options, index=default_index)
+if "current_batch" not in st.session_state:
+    st.session_state.current_batch = None
 
-if selected == "+ Create New Batch":
-    with st.form("new_batch_form"):
-        supplier_name = st.text_input("Supplier / Farmer Name")
-        procurement_centre = st.text_input("Procurement Centre")
-        onion_variety = st.text_input("Onion Variety", value="Red Onion")
-        quantity_received = st.number_input("Quantity Received", min_value=0.0, value=0.0)
-        unit = st.selectbox("Unit", ["kg", "quintal", "tonne"])
-        intended_use = st.selectbox("Intended Use", ["Storage", "Immediate Dispatch", "Other"])
-        submitted = st.form_submit_button("Create Batch")
+with st.sidebar.expander(t("create_batch", lang)):
+    supplier = st.text_input(t("supplier", lang))
+    center = st.text_input(t("centre", lang))
+    variety = st.text_input(t("variety", lang))
+    quantity = st.number_input(t("quantity", lang), min_value=0.0, value=0.0)
+    unit = st.selectbox(t("unit", lang), ["kg", "quintal", "tonnes"])
+    intended_use = st.text_input(t("intended_use", lang), value="General")
 
-        if submitted:
-            new_batch_id = create_batch(
-                supplier_name, procurement_centre, onion_variety,
-                quantity_received, unit, intended_use
-            )
-            st.success(f"✅ Batch created: {new_batch_id}")
-            st.session_state["active_batch"] = new_batch_id
-            st.rerun()
+    if st.button(t("create_batch_btn", lang)):
+        if supplier and center:
+            batch_id = create_batch(supplier, center, variety, quantity, unit, intended_use)
+            st.session_state.current_batch = batch_id
+            st.success(f"{t('batch_created', lang)}: {batch_id}")
+        else:
+            st.error(t("supplier_centre_required", lang))
 
-    st.stop()  # don't show inspection UI until a batch exists
-else:
-    st.session_state["active_batch"] = selected
-    active_batch = selected
-    st.info(f"Active batch: **{active_batch}**")
+all_batches = get_all_batches()
+batch_options = [b["batch_id"] for b in all_batches]
+if batch_options:
+    selected = st.sidebar.selectbox(
+        t("active_batch", lang),
+        batch_options,
+        index=batch_options.index(st.session_state.current_batch) if st.session_state.current_batch in batch_options else 0,
+    )
+    st.session_state.current_batch = selected
 
-# ---------------- SAMPLE INSPECTION ----------------
-st.divider()
-st.subheader("🔍 Sample Inspection")
+if not st.session_state.current_batch:
+    st.info(t("select_batch_prompt", lang))
+    st.stop()
 
-tab1, tab2 = st.tabs(["📷 Camera", "📁 Upload"])
+st.subheader(f"{t('active_batch', lang)}: {st.session_state.current_batch}")
+
+# --- Sample inspection ---
+st.markdown(f"### {t('inspect_sample', lang)}")
+tab1, tab2 = st.tabs([t("camera_tab", lang), t("upload_tab", lang)])
 
 img_file = None
 with tab1:
-    camera_img = st.camera_input("Take a photo of the onion")
+    camera_img = st.camera_input(t("take_photo", lang))
     if camera_img is not None:
         img_file = camera_img
 
 with tab2:
-    uploaded_img = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png"])
+    uploaded_img = st.file_uploader(t("upload_image", lang), type=["jpg", "jpeg", "png"])
     if uploaded_img is not None:
         img_file = uploaded_img
 
 if img_file is not None:
     img = Image.open(img_file).convert("RGB")
-    st.image(img, caption="Input image", use_container_width=True)
+    st.image(img, caption=t("sample_image", lang), use_container_width=True)
 
     img_resized = img.resize(IMG_SIZE)
-    img_array = np.array(img_resized)
-    img_array = np.expand_dims(img_array, axis=0)
-    # NOTE: no manual preprocess_input call here -- it's already inside the model.
+    img_array = np.expand_dims(np.array(img_resized), axis=0)
+    probs = model.predict(img_array, verbose=0)[0]
+    predicted_idx = np.argmax(probs)
+    predicted_class = CLASS_NAMES[predicted_idx]
+    confidence = float(probs[predicted_idx])
 
-    prob = model.predict(img_array)[0][0]
-    predicted_class = CLASS_NAMES[1] if prob > 0.5 else CLASS_NAMES[0]
-    confidence = prob if prob > 0.5 else 1 - prob
+    class_key_map = {"healthy": "healthy", "damaged": "damaged", "rotten": "rotten"}
 
-    st.subheader(f"AI Prediction: {predicted_class.upper()}")
-    st.progress(float(confidence))
-    st.write(f"Confidence: {confidence * 100:.1f}%")
+    st.subheader(f"{t('ai_prediction', lang)}: {t(class_key_map[predicted_class], lang).upper()}")
+    st.write(f"{t('confidence', lang)}: {confidence * 100:.1f}%")
+    for i, name in enumerate(CLASS_NAMES):
+        st.write(f"{t(class_key_map[name], lang)}: {probs[i] * 100:.1f}%")
 
     if confidence < CONFIDENCE_THRESHOLD:
-        st.warning("⚠️ Low confidence — manual inspection recommended.")
+        st.warning(t("low_confidence", lang))
     else:
-        st.success("✅ High confidence prediction")
+        st.success(t("high_confidence", lang))
 
-    grading_result = apply_grading(predicted_class, float(confidence), rules)
+    if "last_sample_id" not in st.session_state or st.session_state.get("last_img_name") != img_file.name:
+        img_filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{img_file.name}"
+        img_path = os.path.join(UPLOAD_DIR, img_filename)
+        img.save(img_path)
 
-    st.subheader(f"Grade: {grading_result['grade']}")
-    if grading_result["manual_review_required"]:
-        st.warning("⚠️ Manual review required before final grading.")
-
-    st.caption(
-        "Grading thresholds are currently provisional, pending sourcing of "
-        "verified AGMARK/NAFED onion grading standards."
-    )
-
-    # Stable key tied to the photo bytes, so a rerun doesn't create a duplicate sample
-    img_bytes = img_file.getvalue()
-    photo_key = str(hash(img_bytes))
-    sample_id_key = f"sample_id_{photo_key}"
-
-    # Create the sample row in the database ONCE per unique photo
-    if sample_id_key not in st.session_state:
-        new_sample_id = create_sample(
-            batch_id=active_batch,
-            image_path="(not saved to disk in this MVP)",
-            ai_prediction=predicted_class,
-            ai_confidence=float(confidence),
-            grade=grading_result["grade"],
+        sample_id = create_sample(
+            st.session_state.current_batch, img_path, predicted_class, confidence, grade=None
         )
-        st.session_state[sample_id_key] = new_sample_id
+        st.session_state.last_sample_id = sample_id
+        st.session_state.last_img_name = img_file.name
+        st.session_state.last_prediction = predicted_class
 
-    sample_id = st.session_state[sample_id_key]
-    st.caption(f"Sample ID: **{sample_id}**")
+    sample_id = st.session_state.last_sample_id
 
-    st.divider()
-    st.write("**Human Review**")
-    st.write("Does this AI result look correct to you?")
+    # --- Human verification ---
+    st.markdown(f"#### {t('human_verification', lang)}")
     col1, col2 = st.columns(2)
-
-    reviewed_key = f"reviewed_{sample_id}"
-    if reviewed_key not in st.session_state:
-        st.session_state[reviewed_key] = False
-
-    human_decision = None
     with col1:
-        if st.button("✅ Yes, AI is correct", key=f"confirm_{sample_id}"):
-            human_decision = predicted_class
-
+        if st.button(t("confirm_ai", lang), key=f"confirm_{sample_id}"):
+            record_human_decision(sample_id, predicted_class)
+            st.success(t("confirmed", lang))
     with col2:
         correction = st.selectbox(
-            "❌ No, it's actually:",
-            ["", "healthy", "defective"],
-            key=f"correction_select_{sample_id}",
+            t("correct_to", lang),
+            CLASS_NAMES,
+            format_func=lambda c: t(class_key_map[c], lang),
+            key=f"correct_select_{sample_id}",
         )
-        if correction and st.button("Submit correction", key=f"submit_correction_{sample_id}"):
-            human_decision = correction
+        if st.button(t("submit_correction", lang), key=f"correct_btn_{sample_id}"):
+            reason = st.session_state.get(f"reason_{sample_id}", "")
+            record_human_decision(sample_id, correction, correction_reason=reason)
+            st.success(f"{t('corrected_to', lang)} {t(class_key_map[correction], lang)}.")
 
-    if human_decision is not None and not st.session_state[reviewed_key]:
-        record_human_decision(sample_id, human_decision)
-        st.session_state[reviewed_key] = True
-        if human_decision == predicted_class:
-            st.success(f"✅ Recorded: Human confirmed AI's result ({predicted_class.upper()})")
-        else:
-            st.warning(
-                f"⚠️ Recorded: Human corrected AI. "
-                f"AI said {predicted_class.upper()}, human says {human_decision.upper()}"
-            )
-    elif st.session_state[reviewed_key]:
-        st.info("✔️ This sample has already been reviewed.")
-    else:
-        st.info("👆 Please confirm or correct the result above to record this sample.")
+    reason_text = st.text_input(t("correction_reason", lang), key=f"reason_{sample_id}")
 
-# ---------------- BATCH SUMMARY ----------------
+    # --- Size assessment ---
+    st.markdown(f"#### {t('size_assessment', lang)}")
+    size_labels = [t("size_normal", lang), t("size_undersized", lang), t("size_not_assessed", lang)]
+    size_internal = ["Normal", "Undersized", "Not Assessed"]
+    size_choice_idx = st.radio(
+        t("size_label", lang), range(3),
+        format_func=lambda i: size_labels[i],
+        index=2, key=f"size_{sample_id}", horizontal=True,
+    )
+    if st.button(t("save_size", lang), key=f"size_btn_{sample_id}"):
+        record_size_assessment(sample_id, size_internal[size_choice_idx])
+        st.success(f"{t('size_recorded', lang)}: {size_labels[size_choice_idx]}")
+
 st.divider()
-st.subheader("📊 Batch Summary")
-summary = get_batch_summary(active_batch)
+
+# --- Batch summary ---
+st.markdown(f"### {t('batch_summary', lang)}")
+summary = get_batch_summary(st.session_state.current_batch)
+st.write(f"**{t('total_samples', lang)}:** {summary['total_samples']}")
 
 col1, col2, col3 = st.columns(3)
-col1.metric("Total Samples", summary["total_samples"])
-col2.metric("Healthy %", f"{summary['healthy_pct']}%")
-col3.metric("Defective %", f"{summary['defective_pct']}%")
-st.caption(f"Human corrections: {summary['human_corrections']}")
+col1.metric(t("healthy", lang), f"{summary['healthy']} ({summary['healthy_pct']}%)")
+col2.metric(t("damaged", lang), f"{summary['damaged']} ({summary['damaged_pct']}%)")
+col3.metric(t("rotten", lang), f"{summary['rotten']} ({summary['rotten_pct']}%)")
+
+st.write(f"{t('human_corrections', lang)}: {summary['human_corrections']}")
+st.write(f"{t('size_assessment', lang)} — {t('size_normal', lang)}: {summary['size_normal']}, "
+         f"{t('size_undersized', lang)}: {summary['size_undersized']}, "
+         f"{t('size_not_assessed', lang)}: {summary['size_not_assessed']}")
+
+# --- PDF report ---
+st.divider()
+st.markdown(f"### {t('generate_report', lang)}")
+if st.button(t("generate_pdf_btn", lang)):
+    pdf_path = generate_batch_report(st.session_state.current_batch)
+    with open(pdf_path, "rb") as f:
+        st.download_button(
+            t("download_pdf", lang),
+            data=f,
+            file_name=f"{st.session_state.current_batch}_report.pdf",
+            mime="application/pdf",
+        )
+    st.success(f"{t('report_generated', lang)}: {pdf_path}")

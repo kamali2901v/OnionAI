@@ -4,3 +4,12 @@ __pycache__/
 *.pyc
 .streamlit/
 OnionAI_Share.zip
+dataset/
+dataset_multiclass/
+dataset_multiclass_split/
+dataset_split/
+uploads/
+reports/
+agronex.db
+*.zip
+__pycache__/
